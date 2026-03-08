@@ -1,5 +1,5 @@
 {
-  "name": "cbam-calculator",
+  "name": "cbam-platform",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -12,14 +12,16 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "recharts": "^2.12.0",
-    "jspdf": "^2.5.1",
-    "html2canvas": "^1.4.1"
+    "lucide-react": "^0.263.1",
+    "framer-motion": "^11.0.0"
   },
   "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^4.2.0",
-    "vite": "^5.0.0",
-    "tailwindcss": "^3.4.0",
-    "postcss": "^8.4.0",
-    "autoprefixer": "^10.4.0"
+    "autoprefixer": "^10.4.17",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "vite": "^5.1.0"
   }
 }
