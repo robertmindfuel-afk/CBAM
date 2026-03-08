@@ -1,612 +1,900 @@
-import React, { useState, useMemo, useEffect, useRef } from "react";
-import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend, Area, AreaChart } from "recharts";
-import jsPDF from "jspdf";
-import html2canvas from "html2canvas";
-import CN_CODES from "./data/cnCodes";
-import { PHASE_IN_FACTORS, YEARS, PRODUCT_CATEGORIES, DEFAULT_EU_ETS_PRICE, DEFAULT_INDIA_CARBON_PRICE, getPrecursors, isComplexGood, EXEMPTION_THRESHOLD_TONNES } from "./data/constants";
-import { calculateCBAM, aggregateBasket, generateBasketProjection, formatEuro, formatNumber } from "./utils/calculations";
-import globalCbams from "./data/globalCbams.json";
-const COLORS = ["#6366f1", "#a855f7", "#10b981", "#f59e0b", "#ef4444", "#06b6d4", "#ec4899", "#14b8a6", "#f97316"];
-const TOOLTIP_STYLE = { background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, color: '#111827', boxShadow: '0 10px 25px rgba(0,0,0,0.08)', padding: '10px 14px', fontSize: '0.8rem' };
-const TICK_STYLE = { fill: '#9ca3af', fontSize: 11, fontFamily: 'Inter' };
+import { useState, useMemo, useCallback, useEffect } from 'react';
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart, Cell, PieChart, Pie } from 'recharts';
+import { CN_CODES, SECTORS, getCNCodesBySector, searchCNCodes } from './data/cnCodes.js';
+import { COUNTRIES, DEFAULT_VALUES, getDefaultValue, getIndirectDefault, MARKUP_SCHEDULE } from './data/defaultValues.js';
+import { BENCHMARKS, PHASE_OUT, getETSPrice, DE_MINIMIS_THRESHOLD } from './data/benchmarks.js';
+import { calculateCBAM, calculateMultiYearProjection, formatCurrency, formatNumber } from './utils/calculator.js';
 
-/* ─── Product Search ─── */
-function ProductSearch({ onSelect }) {
-    const [search, setSearch] = useState("");
-    const [category, setCategory] = useState("All Categories");
-    const filtered = useMemo(() => {
-        let items = CN_CODES;
-        if (category !== "All Categories") items = items.filter(p => p.cat === category);
-        if (search.trim()) {
-            const q = search.toLowerCase();
-            items = items.filter(p => p.cn.includes(q) || p.desc.toLowerCase().includes(q));
-        }
-        return items;
-    }, [search, category]);
+// ═══════════════════════════════════════════════════════════
+// ICONS (inline SVG components)
+// ═══════════════════════════════════════════════════════════
+const Icon = ({ d, size = 20, className = '' }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d={d} /></svg>
+);
+const ChevronRight = (p) => <Icon d="M9 18l6-6-6-6" {...p} />;
+const Search = (p) => <Icon d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" {...p} />;
+const Calculator = (p) => <Icon d="M4 2h16a2 2 0 012 2v16a2 2 0 01-2 2H4a2 2 0 01-2-2V4a2 2 0 012-2zM8 6h8M8 10h8M8 14h3M8 18h3" {...p} />;
+const FileText = (p) => <Icon d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z M14 2v6h6" {...p} />;
+const Globe = (p) => <Icon d="M12 2a10 10 0 100 20 10 10 0 000-20z M2 12h20 M12 2a15 15 0 014 10 15 15 0 01-4 10 15 15 0 01-4-10 15 15 0 014-10z" {...p} />;
+const TrendUp = (p) => <Icon d="M23 6l-9.5 9.5-5-5L1 18" {...p} />;
+const Info = (p) => <Icon d="M12 2a10 10 0 100 20 10 10 0 000-20z M12 16v-4 M12 8h.01" {...p} />;
+const Check = (p) => <Icon d="M20 6L9 17l-5-5" {...p} />;
+const Download = (p) => <Icon d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4 M7 10l5 5 5-5 M12 15V3" {...p} />;
 
-    return (
-        <div className="card fade-in">
-            <div className="card-title"><span className="icon">🔍</span> Select Product</div>
-            <div className="category-filters">
-                {PRODUCT_CATEGORIES.map(c => (
-                    <button key={c} className={`cat-btn ${category === c ? 'active' : ''}`} onClick={() => setCategory(c)}>{c}</button>
-                ))}
-            </div>
-            <div className="search-container">
-                <span className="search-icon">⌕</span>
-                <input className="search-input" placeholder="Search by CN code or product description..." value={search} onChange={e => setSearch(e.target.value)} />
-            </div>
-            <div className="product-list">
-                {filtered.slice(0, 50).map((p, i) => (
-                    <div key={i} className="product-item" onClick={() => { onSelect(p); setSearch(""); }}>
-                        <span className="cn">{p.cn}</span>
-                        <span className="desc">{p.desc}</span>
-                        {p.route && <span className="route-badge">{p.route}</span>}
-                        <span className={`good-type-badge ${isComplexGood(p.cn) ? 'complex' : 'simple'}`}>{isComplexGood(p.cn) ? '⛓ Complex' : '● Simple'}</span>
-                    </div>
-                ))}
-                {filtered.length > 50 && <div style={{ padding: '12px 16px', color: 'var(--text-tertiary)', fontSize: '0.8rem', textAlign: 'center', fontWeight: 500 }}>Showing 50 of {filtered.length} results</div>}
-                {filtered.length === 0 && (
-                    <div className="empty-state">
-                        <div className="es-icon">🔎</div>
-                        <div className="es-title">No products found</div>
-                        <div className="es-desc">Try a different search term or category filter</div>
-                    </div>
-                )}
-            </div>
-        </div>
-    );
-}
+// ═══════════════════════════════════════════════════════════
+// NAVIGATION TABS
+// ═══════════════════════════════════════════════════════════
+const TABS = [
+  { id: 'calculator', label: 'Calculator', icon: '⚡' },
+  { id: 'cn-codes', label: 'CN Codes', icon: '📋' },
+  { id: 'defaults', label: 'Default Values', icon: '🌍' },
+  { id: 'benchmarks', label: 'Benchmarks', icon: '📊' },
+  { id: 'timeline', label: 'Compliance', icon: '📅' },
+  { id: 'projections', label: 'Projections', icon: '📈' },
+];
 
-/* ─── Configure Product ─── */
-function ConfigureProduct({ product, onAdd, onCancel, globalYear, globalEuPrice, globalIndiaPrice, globalCountry }) {
-    const countryData = globalCbams.countries[globalCountry];
-    const productDVs = countryData ? countryData[product.cn] : null;
-    const defaultDV = productDVs && productDVs.length > 0 ? productDVs[0] : null;
-    const hasDefaults = defaultDV !== null;
-
-    const [values, setValues] = useState({ quantity: 1000, direct: defaultDV?.direct || 0, indirect: defaultDV?.indirect || 0 });
-    const [useDefault, setUseDefault] = useState(hasDefaults);
-    const [precursorInputs, setPrecursorInputs] = useState([]);
-    const complex = isComplexGood(product.cn);
-    const precursors = getPrecursors(product.cn);
-
-    const handlePrecursorChange = (index, data) => {
-        setPrecursorInputs(prev => { const next = [...prev]; next[index] = data; return next; });
-    };
-
-    useEffect(() => {
-        setUseDefault(hasDefaults);
-        setValues(v => ({ ...v, direct: defaultDV?.direct || 0, indirect: defaultDV?.indirect || 0 }));
-
-        if (precursors.length > 0) {
-            const initial = precursors.map(pc => {
-                const pcDVs = countryData ? countryData[pc.cn] : null;
-                const pcDefault = pcDVs && pcDVs.length > 0 ? pcDVs[0] : null;
-                const defaultSEE = pcDefault ? pcDefault.total : 0;
-                return { massFraction: pc.defaultMass, specificEmissions: defaultSEE };
-            });
-            setPrecursorInputs(initial);
-        } else {
-            setPrecursorInputs([]);
-        }
-    }, [product, globalCountry]);
-
-    const precursorContributions = precursors.map((pc, i) => ({
-        name: pc.name,
-        massFraction: precursorInputs[i]?.massFraction ?? pc.defaultMass,
-        specificEmissions: precursorInputs[i]?.specificEmissions ?? 0,
-    }));
-
-    const result = useMemo(() => calculateCBAM({
-        quantity: values.quantity, directEmissions: values.direct, indirectEmissions: values.indirect,
-        euEtsPrice: globalEuPrice, indianCarbonPrice: globalIndiaPrice, year: globalYear,
-        precursorContributions,
-    }), [values, precursorContributions, globalYear, globalEuPrice, globalIndiaPrice]);
-
-    return (
-        <div className="card fade-in">
-            <div className="card-title"><span className="icon">⚙️</span> Configure Product</div>
-            <div className="selected-product">
-                <span className="sp-cn">{product.cn}</span>
-                <span className="sp-desc">
-                    {product.desc}
-                    {product.route && <span className="route-badge" style={{ marginLeft: 8 }}>{product.route}</span>}
-                    {' '}
-                    <span className={`good-type-badge ${complex ? 'complex' : 'simple'}`}>{complex ? '⛓ Complex' : '● Simple'}</span>
-                </span>
-            </div>
-
-            {!hasDefaults && <div className="warning-banner">⚠️ No default emission values available in the EU registry for {globalCountry} — please enter actual verified data.</div>}
-            {hasDefaults && (
-                <div className="toggle-row">
-                    <div className={`toggle ${useDefault ? 'active' : ''}`} onClick={() => {
-                        const next = !useDefault;
-                        setUseDefault(next);
-                        if (next) setValues(v => ({ ...v, direct: defaultDV?.direct || 0, indirect: defaultDV?.indirect || 0 }));
-                    }} />
-                    <span className="toggle-label">
-                        Use Default Values ({globalCountry})
-                        {useDefault && <span style={{ color: 'var(--accent-600)', fontWeight: 600 }}> — Direct: {defaultDV.direct} | Indirect: {defaultDV.indirect ?? 0} tCO₂/t</span>}
-                    </span>
-                </div>
-            )}
-
-            <div className="form-grid">
-                <div className="field">
-                    <label>Quantity (Tonnes)</label>
-                    <input type="number" value={values.quantity} onChange={e => setValues({ ...values, quantity: e.target.value })} min="0" />
-                </div>
-                {(!useDefault || !hasDefaults) && (<>
-                    <div className="field">
-                        <label>Direct Emissions (tCO₂/t)</label>
-                        <input type="number" step="0.01" value={values.direct} onChange={e => setValues({ ...values, direct: e.target.value })} min="0" />
-                    </div>
-                    <div className="field">
-                        <label>Indirect Emissions (tCO₂/t)</label>
-                        <input type="number" step="0.01" value={values.indirect} onChange={e => setValues({ ...values, indirect: e.target.value })} min="0" />
-                    </div>
-                </>)}
-            </div>
-
-            {complex && precursors.length > 0 && (
-                <div className="precursor-section">
-                    <div className="ps-title">⛓ {precursors.length} Precursor{precursors.length > 1 ? 's' : ''} — Annex II</div>
-                    <div className="info-banner" style={{ background: 'var(--purple-bg)', borderColor: 'var(--purple-border)', color: 'var(--purple-600)' }}>
-                        Precursor emissions required per Article 7. Adjust mass fractions with verified supplier data.
-                    </div>
-                    {precursors.map((pc, i) => {
-                        const inp = precursorInputs[i] || { massFraction: pc.defaultMass, specificEmissions: 0 };
-                        return (
-                            <div className="precursor-item" key={i}>
-                                <div>
-                                    <div className="pi-name">{pc.name}</div>
-                                    <div className="pi-cn">CN {pc.cn}</div>
-                                    {pc.note && <div style={{ fontSize: '0.68rem', color: 'var(--text-tertiary)', marginTop: 3, fontStyle: 'italic' }}>{pc.note}</div>}
-                                </div>
-                                <div className="field">
-                                    <label>Mass Fraction (t/t)</label>
-                                    <input type="number" step="0.01" value={inp.massFraction} onChange={e => handlePrecursorChange(i, { ...inp, massFraction: e.target.value })} min="0" />
-                                </div>
-                                <div className="field">
-                                    <label>SEE (tCO₂/t)</label>
-                                    <input type="number" step="0.01" value={inp.specificEmissions} onChange={e => handlePrecursorChange(i, { ...inp, specificEmissions: e.target.value })} min="0" />
-                                </div>
-                            </div>
-                        );
-                    })}
-                </div>
-            )}
-
-            {result.totalEmissions > 0 && (
-                <div className="preview-bar">
-                    <div className="pv-summary">
-                        {formatNumber(result.totalEmissions)} tCO₂ → {formatNumber(result.certificatesRequired)} certificates
-                    </div>
-                    <div>
-                        <span className="pv-cost">{formatEuro(result.netPayable)}</span>
-                        <span className="pv-unit" style={{ marginLeft: 8 }}>{formatEuro(result.costPerTonne)}/t</span>
-                    </div>
-                </div>
-            )}
-
-            <div className="action-bar" style={{ marginTop: 20 }}>
-                <button className="btn btn-success" onClick={() => {
-                    onAdd({
-                        product, precursorContributions, result,
-                        params: {
-                            quantity: values.quantity, directEmissions: values.direct, indirectEmissions: values.indirect,
-                            euEtsPrice: globalEuPrice, indianCarbonPrice: globalIndiaPrice, year: globalYear
-                        },
-                    });
-                }}>✓ Add to Basket</button>
-                <button className="btn btn-secondary" onClick={onCancel}>Cancel</button>
-            </div>
-        </div>
-    );
-}
-
-/* ─── Basket ─── */
-function BasketView({ items, onRemove, totals }) {
-    if (items.length === 0) return (
-        <div className="card">
-            <div className="card-title"><span className="icon">🛒</span> Product Basket</div>
-            <div className="empty-state">
-                <div className="es-icon">📦</div>
-                <div className="es-title">Basket is empty</div>
-                <div className="es-desc">Select products from the catalog to calculate your CBAM financial exposure</div>
-            </div>
-        </div>
-    );
-
-    const belowExemption = totals.totalQuantity <= EXEMPTION_THRESHOLD_TONNES;
-
-    return (
-        <div className="card fade-in">
-            <div className="card-title"><span className="icon">🛒</span> Product Basket <span className="good-type-badge simple" style={{ marginLeft: 'auto' }}>{items.length} item{items.length > 1 ? 's' : ''}</span></div>
-            {belowExemption && (
-                <div className="info-banner">ℹ️ Total quantity ({formatNumber(totals.totalQuantity, 0)} t) ≤ {EXEMPTION_THRESHOLD_TONNES}t — may qualify for CBAM exemption (excluding hydrogen & electricity).</div>
-            )}
-            <div className="basket-grid">
-                {items.map((item, i) => (
-                    <div className="basket-item slide-in" key={i} style={{ animationDelay: `${i * 50}ms` }}>
-                        <div className="bi-product">
-                            <div className="bi-cn">{item.product.cn}</div>
-                            <div className="bi-desc">{item.product.desc}</div>
-                        </div>
-                        <div className="bi-val"><div className="bv-num">{formatNumber(item.result.quantity, 0)} t</div><div className="bv-label">Quantity</div></div>
-                        <div className="bi-val"><div className="bv-num">{formatNumber(item.result.totalEmissions, 1)}</div><div className="bv-label">tCO₂</div></div>
-                        <div className="bi-val"><div className="bv-num">{formatNumber(item.result.certificatesRequired, 1)}</div><div className="bv-label">Certificates</div></div>
-                        <div className="bi-val"><div className="bv-num" style={{ color: 'var(--accent-600)' }}>{formatEuro(item.result.netPayable)}</div><div className="bv-label">Net Cost</div></div>
-                        <button className="bi-remove" onClick={() => onRemove(i)}>✕ Remove</button>
-                    </div>
-                ))}
-                <div className="basket-totals">
-                    <div style={{ fontWeight: 800, color: 'var(--accent-600)', fontSize: '0.85rem', letterSpacing: '0.5px' }}>TOTAL</div>
-                    <div className="bi-val"><div className="bv-num">{formatNumber(totals.totalQuantity, 0)} t</div><div className="bv-label">Quantity</div></div>
-                    <div className="bi-val"><div className="bv-num">{formatNumber(totals.totalEmissions, 1)}</div><div className="bv-label">tCO₂</div></div>
-                    <div className="bi-val"><div className="bv-num">{formatNumber(totals.totalCertificates, 1)}</div><div className="bv-label">Certificates</div></div>
-                    <div className="bi-val"><div className="bv-num" style={{ color: 'var(--accent-600)', fontSize: '1rem' }}>{formatEuro(totals.totalNetPayable)}</div><div className="bv-label">Net Cost</div></div>
-                </div>
-            </div>
-        </div>
-    );
-}
-
-/* ─── Dashboard ─── */
-function Dashboard({ items, totals }) {
-    if (items.length === 0) return null;
-    const projection = useMemo(() => generateBasketProjection(items), [items]);
-    const yr = items[0]?.result?.year || 2026;
-
-    const pieData = items.map((item) => ({
-        name: item.product.cn + ' ' + item.product.desc.slice(0, 18), value: item.result.netPayable,
-    })).filter(d => d.value > 0);
-
-    return (
-        <div className="fade-in">
-            <div className="metrics-grid">
-                <div className="metric-card"><div className="mc-label">Total Quantity</div><div className="mc-value">{formatNumber(totals.totalQuantity, 0)}</div><div className="mc-unit">tonnes</div></div>
-                <div className="metric-card"><div className="mc-label">Embedded Emissions</div><div className="mc-value">{formatNumber(totals.totalEmissions)}</div><div className="mc-unit">tCO₂</div></div>
-                <div className="metric-card"><div className="mc-label">Certificates Required</div><div className="mc-value">{formatNumber(totals.totalCertificates)}</div><div className="mc-unit">CBAM certificates</div></div>
-                <div className="metric-card highlight"><div className="mc-label">Net Payable</div><div className="mc-value">{formatEuro(totals.totalNetPayable)}</div><div className="mc-unit">After carbon price deduction</div></div>
-                <div className="metric-card green"><div className="mc-label">Avg Cost / Tonne</div><div className="mc-value">{formatEuro(totals.avgCostPerTonne)}</div><div className="mc-unit">Across all products</div></div>
-            </div>
-
-            {items.map((item, idx) => {
-                const r = item.result;
-                const complex = isComplexGood(item.product.cn);
-                return (
-                    <div className="card" key={idx}>
-                        <div className="card-title">
-                            <span className="icon">📊</span>
-                            <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{item.product.cn}</span>
-                            <span style={{ textTransform: 'none', fontWeight: 500, letterSpacing: 0, fontSize: '0.82rem' }}>— {item.product.desc}</span>
-                            <span className={`good-type-badge ${complex ? 'complex' : 'simple'}`} style={{ marginLeft: 'auto' }}>{complex ? '⛓ Complex' : '● Simple'}</span>
-                        </div>
-                        <table className="breakdown-table">
-                            <thead><tr><th>Parameter</th><th>Value</th><th>Method</th></tr></thead>
-                            <tbody>
-                                <tr><td>Direct Emissions</td><td>{formatNumber(r.directEmissions, 3)} tCO₂/t</td><td>{complex ? 'Process only' : 'Total direct'}</td></tr>
-                                <tr><td>Indirect Emissions</td><td>{formatNumber(r.indirectEmissions, 3)} tCO₂/t</td><td>Electricity consumed</td></tr>
-                                {complex && r.precursorDetails.map((pd, i) => (
-                                    <tr key={i} className="precursor-row"><td>↳ {pd.name}</td><td>+{formatNumber(pd.contribution, 3)} tCO₂/t</td><td>{pd.massFraction} × {pd.specificEmissions}</td></tr>
-                                ))}
-                                <tr><td>Specific Embedded Emissions</td><td>{formatNumber(r.specificEmbedded, 3)} tCO₂/t</td><td>D + I{complex ? ' + Precursors' : ''}</td></tr>
-                                <tr><td>Total Emissions ({formatNumber(r.quantity, 0)} × {formatNumber(r.specificEmbedded, 3)})</td><td>{formatNumber(r.totalEmissions)} tCO₂</td><td>Quantity × SEE</td></tr>
-                                <tr><td>Certificates at {(r.phaseFactor * 100).toFixed(1)}% phase-in</td><td>{formatNumber(r.certificatesRequired)}</td><td>Emissions × Phase-in factor</td></tr>
-                                <tr><td><strong>Net CBAM Payable</strong></td><td><strong>{formatEuro(r.netPayable)}</strong></td><td><strong>{formatEuro(r.costPerTonne)}/tonne</strong></td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                );
-            })}
-
-            <div className="charts-grid">
-                <div className="card">
-                    <div className="card-title"><span className="icon">📈</span> Cost Projection 2026–2034</div>
-                    <div className="chart-container">
-                        <ResponsiveContainer>
-                            <AreaChart data={projection}>
-                                <defs>
-                                    <linearGradient id="gradGross" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="0%" stopColor="#818cf8" stopOpacity={0.3} />
-                                        <stop offset="100%" stopColor="#818cf8" stopOpacity={0} />
-                                    </linearGradient>
-                                    <linearGradient id="gradNet" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="0%" stopColor="#10b981" stopOpacity={0.3} />
-                                        <stop offset="100%" stopColor="#10b981" stopOpacity={0} />
-                                    </linearGradient>
-                                </defs>
-                                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                                <XAxis dataKey="year" tick={TICK_STYLE} />
-                                <YAxis tick={TICK_STYLE} />
-                                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                                <Legend wrapperStyle={{ fontSize: '0.75rem', fontWeight: 600 }} />
-                                <Area type="monotone" dataKey="grossCost" name="Gross Cost (€)" stroke="#6366f1" strokeWidth={2} fill="url(#gradGross)" dot={{ r: 3, fill: '#6366f1' }} />
-                                <Area type="monotone" dataKey="netPayable" name="Net Payable (€)" stroke="#10b981" strokeWidth={2} fill="url(#gradNet)" dot={{ r: 3, fill: '#10b981' }} />
-                            </AreaChart>
-                        </ResponsiveContainer>
-                    </div>
-                </div>
-                {pieData.length > 1 && (
-                    <div className="card">
-                        <div className="card-title"><span className="icon">🥧</span> Cost Distribution</div>
-                        <div className="chart-container">
-                            <ResponsiveContainer>
-                                <PieChart>
-                                    <Pie data={pieData} cx="50%" cy="50%" outerRadius={110} innerRadius={55} dataKey="value" strokeWidth={2} stroke="#fff"
-                                        label={({ name, percent }) => `${name.slice(0, 14)}… ${(percent * 100).toFixed(0)}%`}>
-                                        {pieData.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
-                                    </Pie>
-                                    <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v) => formatEuro(v)} />
-                                </PieChart>
-                            </ResponsiveContainer>
-                        </div>
-                    </div>
-                )}
-                {pieData.length === 1 && (
-                    <div className="card">
-                        <div className="card-title"><span className="icon">📊</span> Certificate Projection</div>
-                        <div className="chart-container">
-                            <ResponsiveContainer>
-                                <BarChart data={projection}>
-                                    <defs>
-                                        <linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1">
-                                            <stop offset="0%" stopColor="#6366f1" />
-                                            <stop offset="100%" stopColor="#a855f7" />
-                                        </linearGradient>
-                                    </defs>
-                                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                                    <XAxis dataKey="year" tick={TICK_STYLE} />
-                                    <YAxis tick={TICK_STYLE} />
-                                    <Tooltip contentStyle={TOOLTIP_STYLE} />
-                                    <Bar dataKey="certificates" name="Certificates" fill="url(#barGrad)" radius={[6, 6, 0, 0]} />
-                                </BarChart>
-                            </ResponsiveContainer>
-                        </div>
-                    </div>
-                )}
-            </div>
-
-            <div className="card">
-                <div className="card-title"><span className="icon">📅</span> Phase-in Schedule</div>
-                <div className="phase-timeline">
-                    {YEARS.map(y => (
-                        <div key={y} className={`phase-bar ${y === parseInt(yr) ? 'active' : ''}`} style={{ height: `${24 + (PHASE_IN_FACTORS[y] ?? 1) * 80}px` }}>
-                            <div className="pb-year">{y}</div><div className="pb-pct">{((PHASE_IN_FACTORS[y] ?? 1) * 100).toFixed(1)}%</div>
-                        </div>
-                    ))}
-                </div>
-            </div>
-
-            <div className="card">
-                <div className="card-title"><span className="icon">📋</span> CBAM 2026 Requirements</div>
-                <div className="reg-info">
-                    <div className="reg-item"><div className="ri-label">Period</div><div className="ri-value">Definitive Phase — Jan 1, 2026</div></div>
-                    <div className="reg-item"><div className="ri-label">Declaration</div><div className="ri-value">Annual by Sep 30 of following year</div></div>
-                    <div className="reg-item"><div className="ri-label">Certificate Price</div><div className="ri-value">Quarterly average EU ETS price</div></div>
-                    <div className="reg-item"><div className="ri-label">Verification</div><div className="ri-value">Mandatory third-party verification</div></div>
-                    <div className="reg-item"><div className="ri-label">De Minimis</div><div className="ri-value">≤ 50 tonnes/year (excl. hydrogen)</div></div>
-                    <div className="reg-item"><div className="ri-label">Certificate Validity</div><div className="ri-value">2 years — 100% repurchase by EU</div></div>
-                </div>
-            </div>
-        </div>
-    );
-}
-
-/* ─── PDF Report ─── */
-function PDFReport({ items, totals, exporterInfo, projection }) {
-    if (items.length === 0) return null;
-    const yr = items[0]?.result?.year || 2026;
-    return (
-        <div className="pdf-report" id="pdf-report">
-            <h1>CBAM Financial Impact Report</h1>
-            <p style={{ color: '#6b7280', fontSize: '0.8rem', marginBottom: 4 }}>Generated {new Date().toLocaleDateString('en-US', { day: 'numeric', month: 'long', year: 'numeric' })} | EU Regulation 2023/956</p>
-
-            {(exporterInfo.company || exporterInfo.importer) && (
-                <div className="exporter-info">
-                    <div>{exporterInfo.company && <><span className="label">Exporter: </span>{exporterInfo.company}<br /></>}{exporterInfo.address && <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>{exporterInfo.address}</span>}</div>
-                    <div>{exporterInfo.importer && <><span className="label">EU Importer: </span>{exporterInfo.importer}<br /></>}{exporterInfo.eori && <><span className="label">EORI: </span>{exporterInfo.eori}</>}</div>
-                </div>
-            )}
-
-            <h2>Summary — {items.length} Product{items.length > 1 ? 's' : ''}</h2>
-            <div className="pdf-metric-grid">
-                <div className="pdf-metric"><div className="val">{formatNumber(totals.totalQuantity, 0)}</div><div className="lbl">Tonnes</div></div>
-                <div className="pdf-metric"><div className="val">{formatNumber(totals.totalEmissions)}</div><div className="lbl">tCO₂</div></div>
-                <div className="pdf-metric"><div className="val">{formatNumber(totals.totalCertificates)}</div><div className="lbl">Certificates</div></div>
-                <div className="pdf-metric"><div className="val">{formatEuro(totals.totalGrossCost)}</div><div className="lbl">Gross Cost</div></div>
-                <div className="pdf-metric"><div className="val" style={{ color: '#059669' }}>{formatEuro(totals.totalNetPayable)}</div><div className="lbl">Net Payable</div></div>
-            </div>
-
-            <table>
-                <thead><tr><th>CN Code</th><th>Product</th><th>Qty (t)</th><th>tCO₂</th><th>Certs</th><th>Net Cost</th><th>€/t</th></tr></thead>
-                <tbody>
-                    {items.map((item, i) => (
-                        <tr key={i}>
-                            <td style={{ fontFamily: 'monospace', fontWeight: 700 }}>{item.product.cn}</td>
-                            <td>{item.product.desc}</td>
-                            <td>{formatNumber(item.result.quantity, 0)}</td>
-                            <td>{formatNumber(item.result.totalEmissions)}</td>
-                            <td>{formatNumber(item.result.certificatesRequired)}</td>
-                            <td style={{ fontWeight: 700 }}>{formatEuro(item.result.netPayable)}</td>
-                            <td>{formatEuro(item.result.costPerTonne)}</td>
-                        </tr>
-                    ))}
-                    <tr className="highlight-row">
-                        <td colSpan={2}><strong>TOTAL</strong></td>
-                        <td><strong>{formatNumber(totals.totalQuantity, 0)}</strong></td>
-                        <td><strong>{formatNumber(totals.totalEmissions)}</strong></td>
-                        <td><strong>{formatNumber(totals.totalCertificates)}</strong></td>
-                        <td><strong>{formatEuro(totals.totalNetPayable)}</strong></td>
-                        <td><strong>{formatEuro(totals.avgCostPerTonne)}</strong></td>
-                    </tr>
-                </tbody>
-            </table>
-
-            {items.map((item, idx) => {
-                const r = item.result; const complex = isComplexGood(item.product.cn);
-                return (
-                    <div key={idx}>
-                        <h3>({idx + 1}) {item.product.cn} — {item.product.desc} {item.product.route ? `[${item.product.route}]` : ''} {complex ? '[Complex Good]' : '[Simple Good]'}</h3>
-                        <table>
-                            <thead><tr><th>Parameter</th><th>Value</th><th>Notes</th></tr></thead>
-                            <tbody>
-                                <tr><td>Quantity</td><td>{formatNumber(r.quantity, 0)} tonnes</td><td></td></tr>
-                                <tr><td>Direct Emissions</td><td>{formatNumber(r.directEmissions, 3)} tCO₂/t</td><td>{complex ? 'Process' : 'Total direct'}</td></tr>
-                                <tr><td>Indirect Emissions</td><td>{formatNumber(r.indirectEmissions, 3)} tCO₂/t</td><td>Electricity</td></tr>
-                                {complex && r.precursorDetails.map((pd, i) => (
-                                    <tr key={i} style={{ color: '#7c3aed', fontStyle: 'italic' }}><td>↳ {pd.name}</td><td>+{formatNumber(pd.contribution, 3)} tCO₂/t</td><td>{pd.massFraction} t/t × {pd.specificEmissions} tCO₂/t</td></tr>
-                                ))}
-                                <tr><td>Specific Embedded Emissions</td><td>{formatNumber(r.specificEmbedded, 3)} tCO₂/t</td><td></td></tr>
-                                <tr><td>Phase-in ({r.year})</td><td>{(r.phaseFactor * 100).toFixed(1)}%</td><td>EU Reg. 2023/956 Art. 36(3)(b)</td></tr>
-                                <tr className="highlight-row"><td><strong>Net CBAM Payable</strong></td><td><strong>{formatEuro(r.netPayable)}</strong></td><td>{formatEuro(r.costPerTonne)}/tonne</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                );
-            })}
-
-            <h2>Year-over-Year Projection</h2>
-            <table>
-                <thead><tr><th>Year</th><th>Phase-in</th><th>Certificates</th><th>Gross Cost</th><th>Net Payable</th></tr></thead>
-                <tbody>
-                    {projection.map(p => (
-                        <tr key={p.year} className={p.year === yr ? 'highlight-row' : ''}>
-                            <td>{p.year}</td><td>{p.phaseIn}</td><td>{formatNumber(p.certificates)}</td><td>{formatEuro(p.grossCost)}</td><td>{formatEuro(p.netPayable)}</td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-            <div className="pdf-chart" id="pdf-chart-container">
-                <ResponsiveContainer>
-                    <BarChart data={projection}>
-                        <CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="year" /><YAxis /><Tooltip />
-                        <Bar dataKey="netPayable" name="Net Payable (€)" fill="#4f46e5" radius={[4, 4, 0, 0]} />
-                    </BarChart>
-                </ResponsiveContainer>
-            </div>
-            <div className="footer">
-                <p><strong>CBAM Financial Impact Calculator</strong></p>
-                <p>EU Regulation (EU) 2023/956 • Implementing Regulation (EU) 2023/1773 • Annex II Precursors • Article 36(3)(b) Phase-in</p>
-                <p>This report is for estimation purposes only. Final CBAM liability is determined by the authorized CBAM declarant after mandatory third-party verification.</p>
-                <p style={{ marginTop: 8 }}>{new Date().toLocaleString('en-US')}</p>
-            </div>
-        </div>
-    );
-}
-
-/* ─── Main App ─── */
+// ═══════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════
 export default function App() {
-    const [tab, setTab] = useState('configure');
-    const [basket, setBasket] = useState([]);
-    const [selectedProduct, setSelectedProduct] = useState(null);
-    const [exporterInfo, setExporterInfo] = useState({ company: '', address: '', importer: '', eori: '' });
-    const [globalCountry, setGlobalCountry] = useState('India');
-    const [globalYear, setGlobalYear] = useState(2026);
-    const [globalEuPrice, setGlobalEuPrice] = useState(DEFAULT_EU_ETS_PRICE);
-    const [globalIndiaPrice, setGlobalIndiaPrice] = useState(DEFAULT_INDIA_CARBON_PRICE);
-    const [generating, setGenerating] = useState(false);
+  const [activeTab, setActiveTab] = useState('calculator');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-    const countriesList = useMemo(() => Object.keys(globalCbams.countries).sort(), []);
-
-    const totals = useMemo(() => aggregateBasket(basket), [basket]);
-    const projection = useMemo(() => generateBasketProjection(basket), [basket]);
-
-    const handleAddToBasket = (item) => { setBasket(prev => [...prev, item]); setSelectedProduct(null); setTab('basket'); };
-    const handleRemove = (i) => setBasket(prev => prev.filter((_, idx) => idx !== i));
-
-    const generatePDF = async () => {
-        setGenerating(true);
-        try {
-            await new Promise(r => setTimeout(r, 500));
-            const el = document.getElementById("pdf-report");
-            const canvas = await html2canvas(el, { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
-            const imgData = canvas.toDataURL("image/png");
-            const pdf = new jsPDF("p", "mm", "a4");
-            const pageW = pdf.internal.pageSize.getWidth();
-            const pageH = pdf.internal.pageSize.getHeight();
-            const imgW = pageW - 20;
-            const imgH = (canvas.height * imgW) / canvas.width;
-            let heightLeft = imgH, position = 10;
-            pdf.addImage(imgData, "PNG", 10, position, imgW, imgH);
-            heightLeft -= (pageH - 20);
-            while (heightLeft > 0) { position = heightLeft - imgH + 10; pdf.addPage(); pdf.addImage(imgData, "PNG", 10, position, imgW, imgH); heightLeft -= (pageH - 20); }
-            pdf.save(`CBAM_Report_${basket.length}products_${globalYear}.pdf`);
-        } catch (err) { console.error("PDF error:", err); }
-        setGenerating(false);
-    };
-
-    return (
-        <div className="app">
-            <header className="app-header">
-                <h1>CBAM Financial Impact Calculator</h1>
-                <p className="subtitle">Compliance Tool for Exporters to the European Union</p>
-                <span className="badge-count">255 CN Codes · Multi-Product Basket · Precursor Emissions · 2026–2034</span>
-            </header>
-
-            <div className="card">
-                <div className="card-title"><span className="icon">🏢</span> Exporter & Importer Details</div>
-                <div className="exporter-grid">
-                    <div className="field"><label>Exporter Company</label><input value={exporterInfo.company} onChange={e => setExporterInfo({ ...exporterInfo, company: e.target.value })} placeholder="e.g. Tata Steel Ltd." /></div>
-                    <div className="field"><label>EU Importer</label><input value={exporterInfo.importer} onChange={e => setExporterInfo({ ...exporterInfo, importer: e.target.value })} placeholder="e.g. ThyssenKrupp AG" /></div>
-                    <div className="field"><label>Address</label><input value={exporterInfo.address} onChange={e => setExporterInfo({ ...exporterInfo, address: e.target.value })} placeholder="City, Country" /></div>
-                    <div className="field"><label>EORI Number</label><input value={exporterInfo.eori} onChange={e => setExporterInfo({ ...exporterInfo, eori: e.target.value })} placeholder="EU EORI" /></div>
-                </div>
-                <div className="form-grid" style={{ marginTop: 18 }}>
-                    <div className="field">
-                        <label>Country of Origin</label>
-                        <select value={globalCountry} onChange={e => setGlobalCountry(e.target.value)}>
-                            {countriesList.map(c => <option key={c} value={c}>{c}</option>)}
-                        </select>
-                    </div>
-                    <div className="field">
-                        <label>Import Year</label>
-                        <select value={globalYear} onChange={e => setGlobalYear(parseInt(e.target.value))}>
-                            {YEARS.map(y => <option key={y} value={y}>{y} — {(PHASE_IN_FACTORS[y] * 100).toFixed(1)}% phase-in</option>)}
-                        </select>
-                    </div>
-                    <div className="field"><label>EU ETS Price (€/tCO₂)</label><input type="number" value={globalEuPrice} onChange={e => setGlobalEuPrice(e.target.value)} min="0" /></div>
-                    <div className="field"><label>Carbon Price Paid in {globalCountry} (€/tCO₂)</label><input type="number" value={globalIndiaPrice} onChange={e => setGlobalIndiaPrice(e.target.value)} min="0" /></div>
-                </div>
+  return (
+    <div className="min-h-screen bg-grid" style={{ background: 'var(--bg-primary)' }}>
+      {/* Header */}
+      <header className="sticky top-0 z-50" style={{ background: 'rgba(10,15,26,0.85)', backdropFilter: 'blur(20px)', borderBottom: '1px solid var(--border-subtle)' }}>
+        <div className="max-w-[1440px] mx-auto px-4 sm:px-6">
+          <div className="flex items-center justify-between h-16">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg" style={{ background: 'linear-gradient(135deg, #22c55e, #3b82f6)' }}>
+                <span style={{ fontSize: '18px' }}>◈</span>
+              </div>
+              <div>
+                <h1 className="text-base font-bold tracking-tight" style={{ color: 'var(--text-primary)' }}>CBAM Compass</h1>
+                <p className="text-[10px] font-medium tracking-wider uppercase" style={{ color: 'var(--text-muted)' }}>EU Carbon Border Adjustment</p>
+              </div>
             </div>
 
-            <div className="tab-bar">
-                <button className={`tab-btn ${tab === 'configure' ? 'active' : ''}`} onClick={() => setTab('configure')}>
-                    ➕ Add Products
+            {/* Desktop Nav */}
+            <nav className="hidden lg:flex items-center gap-1">
+              {TABS.map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className="px-3 py-2 rounded-lg text-sm font-medium transition-all"
+                  style={{
+                    background: activeTab === tab.id ? 'var(--accent-dim)' : 'transparent',
+                    color: activeTab === tab.id ? 'var(--accent)' : 'var(--text-secondary)',
+                    border: activeTab === tab.id ? '1px solid rgba(34,197,94,0.3)' : '1px solid transparent',
+                  }}
+                >
+                  <span className="mr-1.5">{tab.icon}</span>{tab.label}
                 </button>
-                <button className={`tab-btn ${tab === 'basket' ? 'active' : ''}`} onClick={() => setTab('basket')}>
-                    📊 Basket & Report {basket.length > 0 && <span className="tab-count">{basket.length}</span>}
+              ))}
+            </nav>
+
+            {/* Mobile menu button */}
+            <button className="lg:hidden p-2 rounded-lg" style={{ color: 'var(--text-secondary)' }} onClick={() => setMobileMenuOpen(!mobileMenuOpen)}>
+              <svg width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+            </button>
+          </div>
+
+          {/* Mobile Nav */}
+          {mobileMenuOpen && (
+            <nav className="lg:hidden pb-4 flex flex-wrap gap-2">
+              {TABS.map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => { setActiveTab(tab.id); setMobileMenuOpen(false); }}
+                  className="px-3 py-2 rounded-lg text-sm font-medium transition-all"
+                  style={{
+                    background: activeTab === tab.id ? 'var(--accent-dim)' : 'rgba(255,255,255,0.03)',
+                    color: activeTab === tab.id ? 'var(--accent)' : 'var(--text-secondary)',
+                  }}
+                >
+                  {tab.icon} {tab.label}
                 </button>
-            </div>
-
-            {tab === 'configure' && (
-                <>
-                    {!selectedProduct && <ProductSearch onSelect={setSelectedProduct} />}
-                    {selectedProduct && (
-                        <ConfigureProduct product={selectedProduct} onAdd={handleAddToBasket} onCancel={() => setSelectedProduct(null)}
-                            globalYear={globalYear} globalEuPrice={globalEuPrice} globalIndiaPrice={globalIndiaPrice} globalCountry={globalCountry} />
-                    )}
-                </>
-            )}
-
-            {tab === 'basket' && (
-                <>
-                    <BasketView items={basket} onRemove={handleRemove} totals={totals} />
-                    <Dashboard items={basket} totals={totals} />
-                    {basket.length > 0 && (
-                        <div className="action-bar">
-                            <button className="btn btn-primary" onClick={generatePDF} disabled={generating}>
-                                {generating ? '⏳ Generating PDF...' : '📄 Download PDF Report'}
-                            </button>
-                            <button className="btn btn-secondary" onClick={() => setTab('configure')}>➕ Add Another Product</button>
-                        </div>
-                    )}
-                </>
-            )}
-
-            <PDFReport items={basket} totals={totals} exporterInfo={exporterInfo} projection={projection} />
+              ))}
+            </nav>
+          )}
         </div>
-    );
+      </header>
+
+      {/* Main Content */}
+      <main className="max-w-[1440px] mx-auto px-4 sm:px-6 py-6">
+        {activeTab === 'calculator' && <CalculatorView />}
+        {activeTab === 'cn-codes' && <CNCodesView />}
+        {activeTab === 'defaults' && <DefaultValuesView />}
+        {activeTab === 'benchmarks' && <BenchmarksView />}
+        {activeTab === 'timeline' && <TimelineView />}
+        {activeTab === 'projections' && <ProjectionsView />}
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t py-6 px-6 text-center" style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }}>
+        <p className="text-xs">
+          CBAM Compass — Based on Regulation (EU) 2023/956 and Implementing Regulations 2025/2547–2621.
+          Data for informational purposes. Verify with official EU CBAM Registry for compliance.
+        </p>
+      </footer>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// 1. CALCULATOR VIEW — Main CBAM Calculator
+// ═══════════════════════════════════════════════════════════
+function CalculatorView() {
+  const [step, setStep] = useState(1);
+  const [form, setForm] = useState({
+    sector: 'iron_steel', cnCode: '', product: '', country: 'CN',
+    quantity: 1000, year: 2026, benchmark: 1.370,
+    useActual: false, actualDirect: '', actualIndirect: '',
+    productionRoute: 'BF-BOF integrated',
+  });
+  const [result, setResult] = useState(null);
+
+  const sectorCodes = useMemo(() => getCNCodesBySector(form.sector), [form.sector]);
+  const nonExemptCountries = useMemo(() => COUNTRIES.filter(c => !c.exempt), []);
+
+  const handleCalculate = useCallback(() => {
+    const r = calculateCBAM({
+      quantity: parseFloat(form.quantity) || 0,
+      product: form.product,
+      countryCode: form.country,
+      year: parseInt(form.year),
+      benchmark: parseFloat(form.benchmark) || 0,
+      sector: form.sector,
+      useActualEmissions: form.useActual,
+      actualDirectEmissions: form.useActual ? parseFloat(form.actualDirect) || 0 : null,
+      actualIndirectEmissions: form.useActual ? parseFloat(form.actualIndirect) || 0 : null,
+    });
+    setResult(r);
+    setStep(4);
+  }, [form]);
+
+  const projection = useMemo(() => {
+    if (!result) return [];
+    return calculateMultiYearProjection({
+      quantity: parseFloat(form.quantity) || 0,
+      product: form.product,
+      countryCode: form.country,
+      benchmark: parseFloat(form.benchmark) || 0,
+      sector: form.sector,
+      useActualEmissions: form.useActual,
+      actualDirectEmissions: form.useActual ? parseFloat(form.actualDirect) || 0 : null,
+      actualIndirectEmissions: form.useActual ? parseFloat(form.actualIndirect) || 0 : null,
+    });
+  }, [result, form]);
+
+  const updateForm = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
+
+  return (
+    <div className="space-y-6">
+      {/* Hero Banner */}
+      <div className="glass-card p-6 sm:p-8" style={{ background: 'linear-gradient(135deg, rgba(34,197,94,0.08), rgba(59,130,246,0.08))' }}>
+        <h2 className="text-2xl sm:text-3xl font-bold mb-2">
+          <span className="gradient-text">CBAM Calculator</span>
+        </h2>
+        <p style={{ color: 'var(--text-secondary)' }} className="text-sm max-w-2xl">
+          Calculate your embedded emissions, CBAM certificate requirements, carbon price deductions, and total financial liability under the EU CBAM definitive period (2026–2034).
+        </p>
+      </div>
+
+      {/* Step indicators */}
+      <div className="flex items-center gap-2 sm:gap-4 overflow-x-auto pb-2">
+        {['Product', 'Origin & Volume', 'Emissions', 'Results'].map((label, i) => (
+          <button key={i} onClick={() => setStep(i + 1)} className="flex items-center gap-2 flex-shrink-0">
+            <div className={`step-dot ${step === i + 1 ? 'step-dot-active' : step > i + 1 ? 'step-dot-complete' : 'step-dot-pending'}`}>
+              {step > i + 1 ? '✓' : i + 1}
+            </div>
+            <span className="text-sm font-medium hidden sm:block" style={{ color: step === i + 1 ? 'var(--accent)' : 'var(--text-muted)' }}>{label}</span>
+            {i < 3 && <div className="w-8 h-px mx-1" style={{ background: 'var(--border-subtle)' }} />}
+          </button>
+        ))}
+      </div>
+
+      {/* Step 1: Product Selection */}
+      {step === 1 && (
+        <div className="glass-card p-6 space-y-5 animate-fade-in">
+          <h3 className="text-lg font-semibold">Select CBAM Sector & Product</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            {Object.values(SECTORS).map(s => (
+              <button key={s.id} onClick={() => { updateForm('sector', s.id); updateForm('product', ''); updateForm('cnCode', ''); }}
+                className="p-4 rounded-xl text-center transition-all"
+                style={{
+                  background: form.sector === s.id ? 'var(--accent-dim)' : 'rgba(255,255,255,0.02)',
+                  border: form.sector === s.id ? '1px solid var(--border-active)' : '1px solid var(--border-subtle)',
+                }}>
+                <div className="text-2xl mb-2">{s.icon}</div>
+                <div className="text-xs font-semibold" style={{ color: form.sector === s.id ? 'var(--accent)' : 'var(--text-secondary)' }}>{s.name}</div>
+              </button>
+            ))}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>CN Code / Product</label>
+            <select className="cbam-select" value={form.cnCode}
+              onChange={e => {
+                const code = sectorCodes.find(c => c.cn === e.target.value);
+                updateForm('cnCode', e.target.value);
+                if (code) updateForm('product', code.aggregated);
+              }}>
+              <option value="">Select CN code...</option>
+              {sectorCodes.map(c => (
+                <option key={c.cn} value={c.cn}>{c.cn} — {c.desc}</option>
+              ))}
+            </select>
+          </div>
+
+          {form.product && (
+            <div className="p-4 rounded-xl" style={{ background: 'var(--accent-dim)', border: '1px solid var(--border-active)' }}>
+              <div className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Selected product category</div>
+              <div className="text-lg font-bold mt-1" style={{ color: 'var(--accent)' }}>{form.product}</div>
+              <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                GHG covered: {SECTORS[form.sector.toUpperCase()]?.ghg?.join(', ') || 'CO₂'} • 
+                {form.sector === 'electricity' || form.sector === 'hydrogen' ? ' No de minimis exemption' : ` De minimis: ${DE_MINIMIS_THRESHOLD}t/year`}
+              </div>
+            </div>
+          )}
+
+          <div className="flex justify-end">
+            <button onClick={() => form.product && setStep(2)}
+              disabled={!form.product}
+              className="px-6 py-2.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-30"
+              style={{ background: 'var(--accent)', color: '#000' }}>
+              Next: Origin & Volume →
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Step 2: Origin & Volume */}
+      {step === 2 && (
+        <div className="glass-card p-6 space-y-5 animate-fade-in">
+          <h3 className="text-lg font-semibold">Origin Country & Import Volume</h3>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>Country of Origin</label>
+              <select className="cbam-select" value={form.country} onChange={e => updateForm('country', e.target.value)}>
+                {nonExemptCountries.map(c => (
+                  <option key={c.code} value={c.code}>{c.name} ({c.code})</option>
+                ))}
+              </select>
+              {(() => {
+                const ctry = COUNTRIES.find(c => c.code === form.country);
+                return ctry && (
+                  <div className="mt-2 text-xs space-y-1" style={{ color: 'var(--text-muted)' }}>
+                    <div>Carbon pricing: {ctry.mechanism}</div>
+                    <div>Effective price: €{ctry.effectivePrice}/tCO₂</div>
+                  </div>
+                );
+              })()}
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>Import Quantity ({form.sector === 'electricity' ? 'MWh' : 'tonnes'})</label>
+              <input type="number" className="cbam-input" value={form.quantity} onChange={e => updateForm('quantity', e.target.value)} min="0" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>Compliance Year</label>
+              <select className="cbam-select" value={form.year} onChange={e => updateForm('year', e.target.value)}>
+                {[2026,2027,2028,2029,2030,2031,2032,2033,2034].map(y => (
+                  <option key={y} value={y}>{y} — {PHASE_OUT.find(p=>p.year===y)?.label || ''}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="flex justify-between">
+            <button onClick={() => setStep(1)} className="px-5 py-2.5 rounded-xl text-sm font-medium" style={{ color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}>← Back</button>
+            <button onClick={() => setStep(3)} className="px-6 py-2.5 rounded-xl text-sm font-semibold" style={{ background: 'var(--accent)', color: '#000' }}>Next: Emissions →</button>
+          </div>
+        </div>
+      )}
+
+      {/* Step 3: Emissions Data */}
+      {step === 3 && (
+        <div className="glass-card p-6 space-y-5 animate-fade-in">
+          <h3 className="text-lg font-semibold">Emissions & Benchmark Data</h3>
+
+          {/* Toggle actual vs default */}
+          <div className="flex gap-3">
+            {[false, true].map(isActual => (
+              <button key={String(isActual)} onClick={() => updateForm('useActual', isActual)}
+                className="flex-1 p-4 rounded-xl text-left transition-all"
+                style={{
+                  background: form.useActual === isActual ? 'var(--accent-dim)' : 'rgba(255,255,255,0.02)',
+                  border: form.useActual === isActual ? '1px solid var(--border-active)' : '1px solid var(--border-subtle)',
+                }}>
+                <div className="text-sm font-semibold" style={{ color: form.useActual === isActual ? 'var(--accent)' : 'var(--text-primary)' }}>
+                  {isActual ? 'Actual (Verified)' : 'Default Values'}
+                </div>
+                <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                  {isActual ? 'Verified installation data — no markup' : `EU default + ${(MARKUP_SCHEDULE[form.year]?.standard || 0.3)*100}% markup (${form.year})`}
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {form.useActual ? (
+            <div className="grid sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>Direct Emissions (tCO₂e/t)</label>
+                <input type="number" step="0.001" className="cbam-input" value={form.actualDirect} onChange={e => updateForm('actualDirect', e.target.value)} placeholder="e.g. 1.90" />
+              </div>
+              {['cement','fertilizers','hydrogen'].includes(form.sector) && (
+                <div>
+                  <label className="block text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>Indirect Emissions (tCO₂e/t)</label>
+                  <input type="number" step="0.001" className="cbam-input" value={form.actualIndirect} onChange={e => updateForm('actualIndirect', e.target.value)} placeholder="e.g. 0.15" />
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="p-4 rounded-xl" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid var(--border-subtle)' }}>
+              <div className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--text-muted)' }}>Default value applied</div>
+              <div className="text-xl font-bold number-display" style={{ color: 'var(--accent)' }}>
+                {formatNumber(getDefaultValue(form.product, form.country, parseInt(form.year)) || 0, 3)} tCO₂e/t
+              </div>
+              <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                Base: {formatNumber((getDefaultValue(form.product, form.country, parseInt(form.year)) || 0) / (1 + (MARKUP_SCHEDULE[form.year]?.standard || 0.3)), 3)} + 
+                {((MARKUP_SCHEDULE[form.year]?.standard || 0.3)*100)}% markup
+              </div>
+            </div>
+          )}
+
+          {/* Benchmark selection */}
+          <div>
+            <label className="block text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>Applicable Benchmark (tCO₂e/t)</label>
+            <div className="grid sm:grid-cols-2 gap-3">
+              <select className="cbam-select" value={form.productionRoute}
+                onChange={e => {
+                  updateForm('productionRoute', e.target.value);
+                  const bm = BENCHMARKS[form.sector]?.find(b => b.route === e.target.value);
+                  if (bm) updateForm('benchmark', form.useActual ? bm.benchA : bm.benchB);
+                }}>
+                {(BENCHMARKS[form.sector] || []).map((b, i) => (
+                  <option key={i} value={b.route}>{b.product} — {b.route}</option>
+                ))}
+              </select>
+              <input type="number" step="0.001" className="cbam-input" value={form.benchmark} onChange={e => updateForm('benchmark', e.target.value)} />
+            </div>
+          </div>
+
+          <div className="flex justify-between">
+            <button onClick={() => setStep(2)} className="px-5 py-2.5 rounded-xl text-sm font-medium" style={{ color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}>← Back</button>
+            <button onClick={handleCalculate} className="px-8 py-2.5 rounded-xl text-sm font-bold" style={{ background: 'linear-gradient(135deg, #22c55e, #16a34a)', color: '#000' }}>
+              ⚡ Calculate CBAM Liability
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Step 4: Results */}
+      {step === 4 && result && (
+        <div className="space-y-5 animate-fade-in">
+          {/* KPI Cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            {[
+              { label: 'Total Embedded', value: `${formatNumber(result.emissions.totalEmbedded, 1)} tCO₂e`, sub: `${formatNumber(result.emissions.specificTotal, 3)}/t`, color: '#60a5fa' },
+              { label: 'Net Certificates', value: formatNumber(result.netCertificates, 1), sub: `@ €${result.etsPrice}/cert`, color: '#fbbf24' },
+              { label: 'Total CBAM Cost', value: formatCurrency(result.totalCost), sub: `${formatCurrency(result.costPerTonne)}/tonne`, color: '#22c55e' },
+              { label: 'Phase-out', value: `${(result.phaseOut.obligation * 100).toFixed(1)}%`, sub: result.phaseOut.label, color: '#a78bfa' },
+            ].map((kpi, i) => (
+              <div key={i} className="glass-card p-5 glow-green">
+                <div className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: 'var(--text-muted)' }}>{kpi.label}</div>
+                <div className="text-xl sm:text-2xl font-bold number-display" style={{ color: kpi.color }}>{kpi.value}</div>
+                <div className="text-xs mt-1 number-display" style={{ color: 'var(--text-muted)' }}>{kpi.sub}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Breakdown */}
+          <div className="grid lg:grid-cols-2 gap-5">
+            <div className="glass-card p-6">
+              <h4 className="text-sm font-semibold uppercase tracking-wider mb-4" style={{ color: 'var(--text-muted)' }}>Calculation Breakdown</h4>
+              <div className="space-y-3">
+                {[
+                  ['Gross Embedded Emissions', `${formatNumber(result.emissions.totalEmbedded, 2)} tCO₂e`],
+                  ['Free Allocation (SEFA)', `− ${formatNumber(result.freeAllocation.sefa, 2)} tCO₂e`],
+                  ['Gross Certificates', `= ${formatNumber(result.grossCertificates, 2)}`],
+                  ['Carbon Price Deduction', `− ${formatNumber(result.carbonPriceDeduction.deductionTonnes, 2)} equiv.`],
+                  ['Net Certificates Required', `= ${formatNumber(result.netCertificates, 2)}`],
+                  ['Certificate Price', `× €${result.etsPrice}`],
+                  ['Total CBAM Cost', formatCurrency(result.totalCost)],
+                ].map(([label, value], i) => (
+                  <div key={i} className="flex justify-between items-center py-2" style={{ borderBottom: i < 6 ? '1px solid var(--border-subtle)' : 'none' }}>
+                    <span className="text-sm" style={{ color: i === 6 ? 'var(--accent)' : 'var(--text-secondary)' }}>{label}</span>
+                    <span className={`text-sm font-semibold number-display ${i === 6 ? 'text-lg' : ''}`}
+                      style={{ color: i === 6 ? 'var(--accent)' : 'var(--text-primary)' }}>{value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Multi-year chart */}
+            <div className="glass-card p-6">
+              <h4 className="text-sm font-semibold uppercase tracking-wider mb-4" style={{ color: 'var(--text-muted)' }}>Cost Projection 2026–2034</h4>
+              <ResponsiveContainer width="100%" height={250}>
+                <AreaChart data={projection.map(p => ({ year: p.input.year, cost: Math.round(p.totalCost), certs: Math.round(p.netCertificates) }))}>
+                  <defs>
+                    <linearGradient id="costGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#22c55e" stopOpacity={0.3}/>
+                      <stop offset="95%" stopColor="#22c55e" stopOpacity={0}/>
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                  <XAxis dataKey="year" tick={{ fill: '#64748b', fontSize: 11 }} />
+                  <YAxis tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={v => `€${(v/1000).toFixed(0)}k`} />
+                  <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', fontSize: '12px' }}
+                    formatter={(v) => [`€${v.toLocaleString()}`, 'Total Cost']} />
+                  <Area type="monotone" dataKey="cost" stroke="#22c55e" fill="url(#costGrad)" strokeWidth={2} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Parameters summary */}
+          <div className="glass-card p-6">
+            <h4 className="text-sm font-semibold uppercase tracking-wider mb-4" style={{ color: 'var(--text-muted)' }}>Parameters Used</h4>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+              {[
+                ['Product', form.product],
+                ['CN Code', form.cnCode],
+                ['Origin', result.country?.name || form.country],
+                ['Quantity', `${formatNumber(form.quantity, 0)} t`],
+                ['Year', form.year],
+                ['Benchmark', `${form.benchmark} tCO₂e/t`],
+              ].map(([l, v], i) => (
+                <div key={i}>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>{l}</div>
+                  <div className="text-sm font-semibold mt-0.5" style={{ color: 'var(--text-primary)' }}>{v}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <button onClick={() => { setStep(1); setResult(null); }} className="px-6 py-2.5 rounded-xl text-sm font-medium" style={{ color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}>
+            ← New Calculation
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// 2. CN CODES BROWSER
+// ═══════════════════════════════════════════════════════════
+function CNCodesView() {
+  const [search, setSearch] = useState('');
+  const [selectedSector, setSelectedSector] = useState('all');
+
+  const filtered = useMemo(() => {
+    let codes = search ? searchCNCodes(search) : CN_CODES;
+    if (selectedSector !== 'all') codes = codes.filter(c => c.sector === selectedSector);
+    return codes;
+  }, [search, selectedSector]);
+
+  return (
+    <div className="space-y-5">
+      <div className="glass-card p-6">
+        <h2 className="text-xl font-bold mb-1"><span className="gradient-text">CBAM CN Codes Database</span></h2>
+        <p className="text-sm mb-5" style={{ color: 'var(--text-secondary)' }}>
+          {CN_CODES.length} CN codes across {Object.keys(SECTORS).length} sectors — per Annex I of Regulation (EU) 2023/956
+        </p>
+        <div className="flex flex-col sm:flex-row gap-3">
+          <div className="relative flex-1">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }} />
+            <input className="cbam-input pl-10" placeholder="Search CN code, product name..." value={search} onChange={e => setSearch(e.target.value)} />
+          </div>
+          <select className="cbam-select sm:w-48" value={selectedSector} onChange={e => setSelectedSector(e.target.value)}>
+            <option value="all">All Sectors ({CN_CODES.length})</option>
+            {Object.values(SECTORS).map(s => (
+              <option key={s.id} value={s.id}>{s.icon} {s.name} ({getCNCodesBySector(s.id).length})</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="glass-card overflow-hidden">
+        <div className="overflow-x-auto" style={{ maxHeight: '70vh' }}>
+          <table className="cbam-table">
+            <thead>
+              <tr>
+                <th>CN Code</th>
+                <th>Description</th>
+                <th>Sector</th>
+                <th>Category</th>
+                <th>Unit</th>
+                <th>De Minimis</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.slice(0, 200).map((code, i) => (
+                <tr key={i}>
+                  <td className="font-mono font-semibold text-sm" style={{ color: 'var(--accent)' }}>{code.cn}</td>
+                  <td className="max-w-xs">{code.desc}</td>
+                  <td><span className={`badge ${code.sector === 'cement' ? 'badge-slate' : code.sector === 'iron_steel' ? 'badge-blue' : code.sector === 'aluminium' ? 'badge-purple' : code.sector === 'fertilizers' ? 'badge-green' : 'badge-amber'}`}>
+                    {SECTORS[code.sector.toUpperCase()]?.name || code.sector}
+                  </span></td>
+                  <td className="text-sm">{code.aggregated}</td>
+                  <td className="text-sm">{code.unit}</td>
+                  <td>{code.deMinimis ? <span className="badge badge-green">50t</span> : <span className="badge badge-red">None</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {filtered.length > 200 && (
+          <div className="p-3 text-center text-xs" style={{ color: 'var(--text-muted)' }}>Showing first 200 of {filtered.length} results</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// 3. DEFAULT VALUES EXPLORER
+// ═══════════════════════════════════════════════════════════
+function DefaultValuesView() {
+  const [selectedProduct, setSelectedProduct] = useState('Crude steel');
+  const [selectedYear, setSelectedYear] = useState(2026);
+  const products = Object.keys(DEFAULT_VALUES);
+
+  const countryData = useMemo(() => {
+    const vals = DEFAULT_VALUES[selectedProduct];
+    if (!vals) return [];
+    return Object.entries(vals)
+      .filter(([code]) => code !== 'OTHER')
+      .map(([code, base]) => {
+        const isFert = ['Ammonia', 'Urea', 'Nitric acid', 'Ammonium nitrate', 'CAN', 'UAN solution', 'DAP', 'MAP', 'NPK', 'Potassium nitrate'].includes(selectedProduct);
+        const markup = MARKUP_SCHEDULE[Math.min(selectedYear, 2030)] || MARKUP_SCHEDULE[2028];
+        const rate = isFert ? markup.fertilizer : markup.standard;
+        const country = COUNTRIES.find(c => c.code === code);
+        return {
+          code, name: country?.name || code, base, withMarkup: base * (1 + rate),
+          markup: rate * 100, effectiveCP: country?.effectivePrice || 0,
+        };
+      })
+      .sort((a, b) => b.withMarkup - a.withMarkup);
+  }, [selectedProduct, selectedYear]);
+
+  return (
+    <div className="space-y-5">
+      <div className="glass-card p-6">
+        <h2 className="text-xl font-bold mb-1"><span className="gradient-text">Country Default Emission Values</span></h2>
+        <p className="text-sm mb-5" style={{ color: 'var(--text-secondary)' }}>
+          Per Implementing Regulation (EU) 2025/2621 — values include year-specific mark-ups
+        </p>
+        <div className="flex flex-col sm:flex-row gap-3">
+          <select className="cbam-select flex-1" value={selectedProduct} onChange={e => setSelectedProduct(e.target.value)}>
+            {products.map(p => <option key={p} value={p}>{p}</option>)}
+          </select>
+          <select className="cbam-select sm:w-36" value={selectedYear} onChange={e => setSelectedYear(parseInt(e.target.value))}>
+            {[2026,2027,2028,2029,2030].map(y => <option key={y} value={y}>{y} (+{(MARKUP_SCHEDULE[y]?.standard || 0.3)*100}%)</option>)}
+          </select>
+        </div>
+      </div>
+
+      {/* Chart */}
+      <div className="glass-card p-6">
+        <ResponsiveContainer width="100%" height={Math.max(300, countryData.length * 28)}>
+          <BarChart data={countryData} layout="vertical" margin={{ left: 80 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+            <XAxis type="number" tick={{ fill: '#64748b', fontSize: 11 }} />
+            <YAxis type="category" dataKey="name" tick={{ fill: '#94a3b8', fontSize: 11 }} width={75} />
+            <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', fontSize: '12px' }}
+              formatter={(v, name) => [formatNumber(v, 3) + ' tCO₂e/t', name === 'base' ? 'Base value' : 'With markup']} />
+            <Bar dataKey="base" fill="rgba(59,130,246,0.4)" radius={[0, 2, 2, 0]} />
+            <Bar dataKey="withMarkup" fill="#3b82f6" radius={[0, 4, 4, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Table */}
+      <div className="glass-card overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="cbam-table">
+            <thead>
+              <tr><th>Country</th><th>Base Value</th><th>Markup</th><th>With Markup</th><th>Carbon Price Deduction</th></tr>
+            </thead>
+            <tbody>
+              {countryData.map((row, i) => (
+                <tr key={i}>
+                  <td className="font-semibold">{row.name} <span className="text-xs" style={{ color: 'var(--text-muted)' }}>({row.code})</span></td>
+                  <td className="number-display">{formatNumber(row.base, 3)}</td>
+                  <td><span className="badge badge-amber">+{row.markup}%</span></td>
+                  <td className="number-display font-semibold" style={{ color: '#60a5fa' }}>{formatNumber(row.withMarkup, 3)}</td>
+                  <td className="number-display">{row.effectiveCP > 0 ? `€${formatNumber(row.effectiveCP, 2)}/t` : '—'}</td>
+                </tr>
+              ))}
+              <tr style={{ background: 'rgba(239,68,68,0.05)' }}>
+                <td className="font-semibold" style={{ color: '#f87171' }}>Fallback (OTHER)</td>
+                <td className="number-display">{formatNumber(DEFAULT_VALUES[selectedProduct]?.OTHER || 0, 3)}</td>
+                <td><span className="badge badge-red">+{((MARKUP_SCHEDULE[Math.min(selectedYear,2030)]?.standard||0.3)*100)}%</span></td>
+                <td className="number-display font-semibold" style={{ color: '#f87171' }}>{formatNumber(getDefaultValue(selectedProduct, 'OTHER', selectedYear) || 0, 3)}</td>
+                <td>—</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// 4. BENCHMARKS VIEW
+// ═══════════════════════════════════════════════════════════
+function BenchmarksView() {
+  const [selectedSector, setSelectedSector] = useState('iron_steel');
+
+  return (
+    <div className="space-y-5">
+      <div className="glass-card p-6">
+        <h2 className="text-xl font-bold mb-1"><span className="gradient-text">EU CBAM Benchmark Values</span></h2>
+        <p className="text-sm mb-5" style={{ color: 'var(--text-secondary)' }}>
+          Per Implementing Regulation (EU) 2025/2620 — based on top 10% most efficient EU installations
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {Object.entries(BENCHMARKS).map(([key, vals]) => (
+            <button key={key} onClick={() => setSelectedSector(key)}
+              className="px-4 py-2 rounded-lg text-sm font-medium transition-all"
+              style={{
+                background: selectedSector === key ? 'var(--accent-dim)' : 'rgba(255,255,255,0.03)',
+                border: selectedSector === key ? '1px solid var(--border-active)' : '1px solid var(--border-subtle)',
+                color: selectedSector === key ? 'var(--accent)' : 'var(--text-secondary)',
+              }}>
+              {SECTORS[key.toUpperCase()]?.icon} {SECTORS[key.toUpperCase()]?.name || key} ({vals.length})
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="glass-card overflow-hidden">
+        <table className="cbam-table">
+          <thead>
+            <tr><th>Product</th><th>Production Route</th><th>Benchmark A (Actual)</th><th>Benchmark B (Default)</th><th>Unit</th><th>Notes</th></tr>
+          </thead>
+          <tbody>
+            {(BENCHMARKS[selectedSector] || []).map((bm, i) => (
+              <tr key={i}>
+                <td className="font-semibold">{bm.product}</td>
+                <td>{bm.route}</td>
+                <td className="number-display font-semibold" style={{ color: '#22c55e' }}>{bm.benchA !== null ? formatNumber(bm.benchA, 3) : '—'}</td>
+                <td className="number-display font-semibold" style={{ color: '#60a5fa' }}>{bm.benchB !== null ? formatNumber(bm.benchB, 3) : '—'}</td>
+                <td className="text-xs">{bm.unit}</td>
+                <td className="text-xs" style={{ color: 'var(--text-muted)' }}>{bm.note || ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Phase-out chart */}
+      <div className="glass-card p-6">
+        <h3 className="text-sm font-semibold uppercase tracking-wider mb-4" style={{ color: 'var(--text-muted)' }}>Free Allocation Phase-Out Schedule</h3>
+        <ResponsiveContainer width="100%" height={280}>
+          <BarChart data={PHASE_OUT.filter(p => p.year >= 2026)}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+            <XAxis dataKey="year" tick={{ fill: '#64748b', fontSize: 12 }} />
+            <YAxis tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={v => `${(v*100).toFixed(0)}%`} domain={[0, 1]} />
+            <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', fontSize: '12px' }}
+              formatter={(v, name) => [`${(v*100).toFixed(1)}%`, name === 'obligation' ? 'CBAM Liability' : 'Free Allocation']} />
+            <Bar dataKey="cbamFactor" fill="rgba(59,130,246,0.4)" name="Free Allocation" radius={[4, 4, 0, 0]} />
+            <Bar dataKey="obligation" fill="#22c55e" name="CBAM Liability" radius={[4, 4, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// 5. COMPLIANCE TIMELINE VIEW
+// ═══════════════════════════════════════════════════════════
+function TimelineView() {
+  const milestones = [
+    { date: 'Oct 1, 2023', event: 'Transitional period began', desc: 'Quarterly reporting obligations for importers of CBAM goods. No financial obligations.', status: 'complete' },
+    { date: 'Dec 31, 2025', event: 'Transitional period ended', desc: 'Last quarter of reporting-only obligations.', status: 'complete' },
+    { date: 'Jan 1, 2026', event: 'Definitive period begins', desc: 'Financial obligations commence. CBAM certificates required for 2.5% of emissions above benchmark.', status: 'active' },
+    { date: 'Mar 31, 2026', event: 'Authorization deadline', desc: 'Importers must apply for Authorized CBAM Declarant status via EUCTP. Pending applications allow continued imports.', status: 'upcoming' },
+    { date: 'Feb 1, 2027', event: 'Certificate sales begin', desc: 'CBAM certificates available for purchase through the Common Central Platform. Priced at quarterly EU ETS average.', status: 'upcoming' },
+    { date: 'Sep 30, 2027', event: 'First annual declaration', desc: 'Surrender certificates covering 2026 imports. Verified CBAM declarations due.', status: 'upcoming' },
+    { date: '2028', event: '10% CBAM obligation', desc: 'Free allocation drops to 90%. Mark-up on default values rises to +30%.', status: 'future' },
+    { date: '2030', event: '48.5% CBAM obligation', desc: 'Major inflection point — nearly half of free allocation eliminated.', status: 'future' },
+    { date: 'Jan 1, 2028', event: 'Scope expansion (proposed)', desc: '~180 downstream steel/aluminium products added if COM(2025) 989 adopted.', status: 'future' },
+    { date: '2034', event: 'Full CBAM — 100%', desc: 'EU ETS free allocation fully phased out. All embedded emissions subject to CBAM.', status: 'future' },
+  ];
+
+  const reqData = [
+    { category: 'Registration', items: ['EORI number', 'Authorized CBAM Declarant application via EUCTP', 'Financial guarantee (if <2 years established)', 'Clean compliance record (3–5 years)'] },
+    { category: 'Reporting', items: ['Annual CBAM declaration by September 30', 'CN codes (8-digit) for all imports', 'Quantity in tonnes or MWh', 'Country of origin per consignment', 'Installation-level emissions data', 'Production route identification', 'Third-party verification (for actual emissions)'] },
+    { category: 'Financial', items: ['Purchase CBAM certificates (from Feb 2027)', 'Hold ≥50% certificates by end of each quarter', 'Surrender certificates annually by Sep 30', 'Re-purchase surplus by Oct 31', 'Certificates cancelled after 2 years'] },
+    { category: 'Verification', items: ['ISO/IEC 17029-accredited verifier required', 'Physical site visit (first period mandatory)', 'Verification of actual emissions data', 'Review of production process categorization', 'Independent verification report filed'] },
+  ];
+
+  return (
+    <div className="space-y-5">
+      <div className="glass-card p-6">
+        <h2 className="text-xl font-bold mb-1"><span className="gradient-text">Compliance Timeline & Requirements</span></h2>
+        <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>Key dates, milestones, and compliance obligations under the EU CBAM</p>
+      </div>
+
+      {/* Timeline */}
+      <div className="glass-card p-6">
+        <div className="space-y-0">
+          {milestones.map((m, i) => (
+            <div key={i} className="flex gap-4 pb-6 relative">
+              <div className="flex flex-col items-center flex-shrink-0">
+                <div className={`w-3 h-3 rounded-full ${m.status === 'complete' ? 'bg-green-500' : m.status === 'active' ? 'bg-yellow-400 animate-pulse-slow' : m.status === 'upcoming' ? 'bg-blue-400' : 'bg-gray-600'}`} />
+                {i < milestones.length - 1 && <div className="w-px flex-1 min-h-[20px]" style={{ background: 'var(--border-subtle)' }} />}
+              </div>
+              <div className="pb-2">
+                <div className="text-xs font-mono font-semibold" style={{ color: m.status === 'active' ? '#fbbf24' : 'var(--text-muted)' }}>{m.date}</div>
+                <div className="text-sm font-bold mt-0.5" style={{ color: 'var(--text-primary)' }}>{m.event}</div>
+                <div className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>{m.desc}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Requirements Grid */}
+      <div className="grid sm:grid-cols-2 gap-5">
+        {reqData.map((req, i) => (
+          <div key={i} className="glass-card p-6">
+            <h3 className="text-sm font-bold uppercase tracking-wider mb-4" style={{ color: 'var(--accent)' }}>
+              {req.category}
+            </h3>
+            <div className="space-y-2.5">
+              {req.items.map((item, j) => (
+                <div key={j} className="flex items-start gap-2.5">
+                  <div className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0" style={{ background: 'var(--accent)' }} />
+                  <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>{item}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Penalty info */}
+      <div className="glass-card p-6" style={{ borderColor: 'rgba(239,68,68,0.3)' }}>
+        <h3 className="text-sm font-bold uppercase tracking-wider mb-3" style={{ color: '#f87171' }}>⚠ Penalties for Non-Compliance</h3>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <div>
+            <div className="text-xs font-semibold" style={{ color: 'var(--text-muted)' }}>Missing certificates</div>
+            <div className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>€100/tCO₂ penalty (adjusted for inflation) for each unsurrendered certificate, plus obligation to acquire and surrender the missing certificates</div>
+          </div>
+          <div>
+            <div className="text-xs font-semibold" style={{ color: 'var(--text-muted)' }}>Unauthorized imports</div>
+            <div className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>3× penalty (up to €300/tCO₂) for importing without authorized declarant status. Repeated violations may lead to deregistration.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// 6. PROJECTIONS VIEW
+// ═══════════════════════════════════════════════════════════
+function ProjectionsView() {
+  const [product, setProduct] = useState('HR flat ≥600mm');
+  const [country, setCountry] = useState('CN');
+  const [qty, setQty] = useState(10000);
+  const [bm, setBm] = useState(1.370);
+  const [sector, setSector] = useState('iron_steel');
+
+  const projection = useMemo(() => {
+    return calculateMultiYearProjection({
+      quantity: qty, product, countryCode: country, benchmark: bm, sector,
+    });
+  }, [product, country, qty, bm, sector]);
+
+  const chartData = projection.map(p => ({
+    year: p.input.year,
+    cost: Math.round(p.totalCost),
+    certificates: Math.round(p.netCertificates),
+    etsPrice: p.etsPrice,
+    obligation: (p.phaseOut.obligation * 100),
+    costPerT: Math.round(p.costPerTonne),
+  }));
+
+  const totalCost = projection.reduce((sum, p) => sum + p.totalCost, 0);
+
+  return (
+    <div className="space-y-5">
+      <div className="glass-card p-6">
+        <h2 className="text-xl font-bold mb-1"><span className="gradient-text">Multi-Year Cost Projections</span></h2>
+        <p className="text-sm mb-5" style={{ color: 'var(--text-secondary)' }}>
+          Project your CBAM costs from 2026–2034 based on phase-out schedule and EU ETS price projections
+        </p>
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+          <select className="cbam-select" value={product} onChange={e => setProduct(e.target.value)}>
+            {Object.keys(DEFAULT_VALUES).map(p => <option key={p} value={p}>{p}</option>)}
+          </select>
+          <select className="cbam-select" value={country} onChange={e => setCountry(e.target.value)}>
+            {COUNTRIES.filter(c => !c.exempt).map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
+          </select>
+          <input type="number" className="cbam-input" value={qty} onChange={e => setQty(parseFloat(e.target.value) || 0)} placeholder="Quantity (t)" />
+          <input type="number" step="0.001" className="cbam-input" value={bm} onChange={e => setBm(parseFloat(e.target.value) || 0)} placeholder="Benchmark" />
+          <select className="cbam-select" value={sector} onChange={e => setSector(e.target.value)}>
+            {Object.values(SECTORS).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {/* Summary KPIs */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="glass-card p-5">
+          <div className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Cumulative Cost (2026–2034)</div>
+          <div className="text-xl font-bold number-display mt-2" style={{ color: '#22c55e' }}>{formatCurrency(totalCost)}</div>
+        </div>
+        <div className="glass-card p-5">
+          <div className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>2026 Cost</div>
+          <div className="text-xl font-bold number-display mt-2" style={{ color: '#60a5fa' }}>{formatCurrency(projection[0]?.totalCost || 0)}</div>
+        </div>
+        <div className="glass-card p-5">
+          <div className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>2034 Cost (Full CBAM)</div>
+          <div className="text-xl font-bold number-display mt-2" style={{ color: '#fbbf24' }}>{formatCurrency(projection[projection.length-1]?.totalCost || 0)}</div>
+        </div>
+        <div className="glass-card p-5">
+          <div className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Cost Increase (2026→2034)</div>
+          <div className="text-xl font-bold number-display mt-2" style={{ color: '#f87171' }}>
+            {projection[0]?.totalCost > 0 ? `${Math.round((projection[projection.length-1]?.totalCost || 0) / projection[0].totalCost)}×` : '—'}
+          </div>
+        </div>
+      </div>
+
+      {/* Cost chart */}
+      <div className="glass-card p-6">
+        <h3 className="text-sm font-semibold uppercase tracking-wider mb-4" style={{ color: 'var(--text-muted)' }}>Annual CBAM Cost & Certificate Price</h3>
+        <ResponsiveContainer width="100%" height={350}>
+          <BarChart data={chartData}>
+            <defs>
+              <linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#22c55e" stopOpacity={0.9}/>
+                <stop offset="100%" stopColor="#22c55e" stopOpacity={0.3}/>
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+            <XAxis dataKey="year" tick={{ fill: '#64748b', fontSize: 12 }} />
+            <YAxis yAxisId="cost" tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={v => `€${(v/1000).toFixed(0)}k`} />
+            <YAxis yAxisId="price" orientation="right" tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={v => `€${v}`} />
+            <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', fontSize: '12px' }}
+              formatter={(v, name) => [name === 'cost' ? formatCurrency(v) : name === 'etsPrice' ? `€${v}` : `${v}%`, name === 'cost' ? 'CBAM Cost' : name === 'etsPrice' ? 'ETS Price' : 'Obligation']} />
+            <Bar yAxisId="cost" dataKey="cost" fill="url(#barGrad)" radius={[4, 4, 0, 0]} />
+            <Line yAxisId="price" type="monotone" dataKey="etsPrice" stroke="#fbbf24" strokeWidth={2} dot={{ fill: '#fbbf24', r: 3 }} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Detailed table */}
+      <div className="glass-card overflow-hidden">
+        <table className="cbam-table">
+          <thead>
+            <tr><th>Year</th><th>Obligation</th><th>ETS Price</th><th>Certificates</th><th>Cost/Tonne</th><th>Total Cost</th></tr>
+          </thead>
+          <tbody>
+            {projection.map((p, i) => (
+              <tr key={i}>
+                <td className="font-semibold">{p.input.year}</td>
+                <td><span className="badge badge-blue">{(p.phaseOut.obligation * 100).toFixed(1)}%</span></td>
+                <td className="number-display">€{p.etsPrice}</td>
+                <td className="number-display">{formatNumber(p.netCertificates, 0)}</td>
+                <td className="number-display">{formatCurrency(p.costPerTonne)}</td>
+                <td className="number-display font-bold" style={{ color: 'var(--accent)' }}>{formatCurrency(p.totalCost)}</td>
+              </tr>
+            ))}
+            <tr style={{ background: 'rgba(34,197,94,0.05)' }}>
+              <td className="font-bold" colSpan={5}>Cumulative Total (2026–2034)</td>
+              <td className="number-display font-bold text-lg" style={{ color: 'var(--accent)' }}>{formatCurrency(totalCost)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
